@@ -14,9 +14,7 @@ Chart::XMGR - object for displaying data via XMGR
   use Chart::XMGR ();
 
   $xmgr = new Chart::XMGR;
-  $xmgr->line($pdl);
-
-  $pdl->$xmgr->line;
+  $xmgr->plot($pdl);
 
   xmgr($pdl, { LINESTYLE => 'dotted' });
 
