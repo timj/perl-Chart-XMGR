@@ -1,45 +1,51 @@
 #!/usr/local/bin/perl -w
 
 # This test is the same as simple.t except that a named pipe is used.
+use Test::More tests => 3;
+use strict;
 
-BEGIN { $| = 1; print "1..3\n"; }
-END {print "not ok 1\n" unless $loaded;}
-use Chart::XMGR;
-$loaded = 1;
-print "ok 1\n";
-
-
-@a = (1,4,2,6,5);
+BEGIN { use_ok( 'Chart::XMGR' ) };
 
 $Chart::XMGR::NPIPE = 1;
 
-$xmgr = new Chart::XMGR;
-$xmgr->plot(\@a, { SYMBOL => 3, LINECOL => 'red', LINESTYLE => 2, FILL=>0,
-SYMSIZE=>1 });
+my $xmgr = new Chart::XMGR;
 
-$xmgr->configure(SYMCOL=>'green');
+use Data::Dumper;
+print $xmgr;
+#exit;
 
-$xmgr->prt('s0 POINT 2,3');
+SKIP: {
+  # If we did not get a connection it is likely that
+  # we do not have xmgr
+  skip "Unable to instantiate object - assuming xmgr is not installed",2
+    unless $xmgr;
+  print "EEk\n";
+  my @a = (1,4,2,6,5);
+  $xmgr->plot(\@a, { SYMBOL => 3, LINECOL => 'red', LINESTYLE => 2, FILL=>0,
+		     SYMSIZE=>1 });
+
+  $xmgr->configure(SYMCOL=>'green');
+
+  $xmgr->prt('s0 POINT 2,3');
 
 
-@a = (0.1,0.3,0.1,0.5);
-@b = (4,6,3,5);
-@c = (2,2,4,1);
+  @a = (0.1,0.3,0.1,0.5);
+  my @b = (4,6,3,5);
+  my @c = (2,2,4,1);
 
-$xmgr->set(1);
+  $xmgr->set(1);
 
-#$xmgr->prt('@s1 type xydx');
+  #$xmgr->prt('@s1 type xydx');
 
-$xmgr->plot(\@b, \@c);
+  $xmgr->plot(\@b, \@c);
 
-$xmgr->set(0);
+  $xmgr->set(0);
 
-print "ok 2\n";
+  ok(1);
 
-$xmgr->prt("sleep 2");
-$xmgr->plot(\@c, \@b, {settype => 'xy', linewid => 3.4});
+  $xmgr->prt("sleep 2");
+  $xmgr->plot(\@c, \@b, {settype => 'xy', linewid => 3.4});
 
- 
-$xmgr->detach;
-
-print "ok 3\n"
+  $xmgr->detach;
+  ok(1);
+}

@@ -114,6 +114,8 @@ use Carp;
 
 use IO::Pipe;
 use IO::File;
+use File::Spec;
+use Proc::Simple;
 
 # Options parsing
 use PDL::Options;
@@ -142,6 +144,12 @@ Exporter::export_tags('Func');
 
 $NPIPE = 1;
 
+# Amount of time we pause between starting xmgr and finding
+# out whether it is still running (since we can not tell
+# very easily whether a child process has started okay.
+# this should spot the case where xmgr is simply not installed.
+use constant PAUSE => 1;
+
 
 # Need to make a named pipe if NPIPE is true
 # If the mkfifo command is not available then we turn this feature off
@@ -164,7 +172,11 @@ $COUNTER = 0;
 
 # Version number
 
-$VERSION = '0.95';
+$VERSION = '0.96';
+
+# Do not worry about SIGPIPE
+local $SIG{PIPE} = 'IGNORE';
+
 
 # Store the default configuration options
 
@@ -332,6 +344,10 @@ The following methods are available.
 Constructor. Is used to launch the new XMGR process and
 returns the object.
 
+  $xmgr = new Chart::XMGR;
+
+Returns undef if XMGR can not be started.
+
 =cut
 
 
@@ -349,6 +365,7 @@ sub new {
   $xmgr->{Options}  = new PDL::Options( \%DEFAULTS );
   $xmgr->{Debug} = 0;       # Debugging flag
   $xmgr->{Npipe} = undef;   # Name of named pipe
+  $xmgr->{ProcSimple} = undef; # Proc::Simple object when using named pipe
 
   # Bless into class
   bless ($xmgr, $class);
@@ -364,7 +381,8 @@ sub new {
     $COUNTER++;
 
     # Create the named pipe if necessary
-    $xmgr->{Npipe} = "/tmp/xmgr_fifo$$" . "_$COUNTER";
+    $xmgr->{Npipe} = File::Spec->catfile( File::Spec->tmpdir,
+					  "xmgr_fifo$$" . "_$COUNTER");
 
 
     # See if the pipe exists and or is not a pipe
@@ -378,34 +396,62 @@ sub new {
       print "Done\n" if $xmgr->debug;
     }
 
-    # Fork xmgr
-    my $pid;
-    if ($pid = fork) {
-      # Parent
-      # Open pipe
-      $xmgr->{Pipe} = new IO::File;
-      $xmgr->{Pipe}->open("> ". $xmgr->npipe) or
-	die "Can't open named pipe: $!";
- 
-      
-    } elsif (defined $pid) {
-      # Child
-      exec 'xmgr -noask -npipe '.$xmgr->npipe . ' -timer 900';
-      
-    } else {
-      die "Can't fork: $!\n";
-    }
+    # Fork xmgr process
+    my $proc = new Proc::Simple;
+    $proc->start( 'xmgr -noask -npipe '.$xmgr->npipe . ' -timer 900' )
+      or return undef;
+    $proc->kill_on_destroy(1);
+    print "Started xmgr with pid " . $proc->pid. "\n";
+    $xmgr->{ProcSimple} = $proc;
+
+    # Wait a second to let the child process die
+    # if it is going to die
+    sleep(PAUSE);
+    return undef unless $proc->poll;
+
+    # Open pipe for writing [must happen after xmgr has started]
+    $xmgr->{Pipe} = new IO::File;
+    $xmgr->{Pipe}->open("> ". $xmgr->npipe) or
+      die "Can't open named pipe: $!";
+    print "Opened named pipe\n" if $xmgr->debug;
+
   } else {
+
+    # Set up a child handler. This is asynchronous but hopefully
+    # will be able to catch the case where XMGR is not installed.
+    local $SIG{CHLD} = sub { $xmgr->{Pipe} = undef; wait; };
 
     # An anonymous pipe
     $xmgr->{Pipe} = new IO::Pipe;
-    $xmgr->{Pipe}->writer('xmgr -pipe -noask');
 
+    # We need to eval because if the writer fails to exec
+    # we end up with a perl process hanging on if we have ourselves
+    # been called with eval - this confuses Test::More so that we
+    # get two endings from our test scripts. We can not use eval to
+    # tell whether the exec failed from the parent
+    my $parent = $$;
+    eval {
+      $xmgr->{Pipe}->writer('xmgr -pipe -noask');
+    };
+    if ($$ != $parent) {
+      # left over child. Should never happen if the exec worked.
+      # (ie xmgr is installed)
+      # need to exec ourselves
+      exec "$^X -e 'exit'";
+    }
+
+    # Wait a second to let the child process die
+    # but we do not officially know the pid of the child
+    # process. We can use a SIGCHLD but that is asynchronous
+    # if it is going to die
+    sleep(PAUSE);
+    return undef unless $xmgr->{Pipe};
 
   }
 
+  return undef unless $xmgr->{Pipe};
   $xmgr->{Pipe}->autoflush;
-  $xmgr->{Attached} = 1;  
+  $xmgr->{Attached} = 1;
 
   # Configure the options
   $xmgr->{Options}->synonyms( \%SYNONYMS );
@@ -416,8 +462,6 @@ sub new {
   $xmgr->prt('TITLE "Perl->XMGR"');
 
   return $xmgr;
-  
-  
 }
 
 
@@ -536,12 +580,11 @@ sub prt {
     # Normal pipe so need the @ symbol as well
     map { $_ = "\@$_\n" } @args; 
   }
-  
 
   print map { "XMGR: $_" } @args if $self->debug;
 
   my $PIPE = $self->pipe;
-  
+
   foreach (@args) {
     print $PIPE "$_";
   }
@@ -974,16 +1017,19 @@ detach() method has been called.
 sub DESTROY {
 
   my $self = shift;
-  
-  $self->prt("exit\n") if $self->pipe->opened;
 
-  # Close the pipe
-  if ($self->attached) {
-    $self->pipe->close or carp "Cant stop XMGR process: $!";
+  # Shut down XMGR (if it was running)
+  if (defined $self->pipe) {
+    $self->prt("exit\n") if $self->pipe->opened;
+
+    # Close the pipe
+    if ($self->attached) {
+      $self->pipe->close or carp "Cant stop XMGR process: $!";
+    }
   }
 
   # Remove the FIFO
-  unlink $self->npipe;
+  unlink $self->npipe if defined $self->npipe;
 
 }
 
